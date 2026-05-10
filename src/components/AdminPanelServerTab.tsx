@@ -146,7 +146,7 @@ export const AdminPanelServerTab: React.FC = () => {
                   GitHub & Авто-обновление
                 </h4>
                 <p className="text-sm text-slate-300 leading-relaxed text-balance">
-                  Чтобы не скачивать архивы вручную, используйте синхронизацию через GitHub. 
+                  Используйте синхронизацию через GitHub для обновления кода на сервере.
                   Ваш репозиторий:
                   <a href="https://github.com/projectspeedup-commits/server-calc" target="_blank" rel="noreferrer" className="block text-indigo-400 hover:underline mt-1 font-mono text-[11px] break-all">
                     https://github.com/projectspeedup-commits/server-calc
@@ -161,6 +161,54 @@ export const AdminPanelServerTab: React.FC = () => {
                     </button>
                   </div>
                 </div>
+              </section>
+
+              <section className="space-y-3">
+                <h4 className="text-indigo-400 text-xs font-bold uppercase tracking-widest flex items-center gap-2">
+                  <div className="w-1 h-4 bg-emerald-500 rounded-full" />
+                  Internet / Cloud Deployment
+                </h4>
+                <p className="text-sm text-slate-300 leading-relaxed">
+                  Для запуска программы в интернете (на VPS) рекомендуется использовать <b>Docker</b>. 
+                  Это обеспечит стабильность и легкий перенос.
+                </p>
+                <div className="space-y-2">
+                  <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Запуск в облаке:</p>
+                  <div className="bg-slate-950 p-4 rounded-xl font-mono text-sm border border-slate-800 group relative">
+                    <span className="text-slate-500">$</span> <span className="text-emerald-400">docker-compose</span> up -d --build
+                    <button onClick={() => copyToClipboard("docker-compose up -d --build")} className="absolute right-4 top-4 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 italic mt-1">
+                  * Эта команда скачает все зависимости, соберет проект и запустит его в фоновом режиме.
+                </p>
+              </section>
+
+              <section className="space-y-3">
+                <h4 className="text-indigo-400 text-xs font-bold uppercase tracking-widest flex items-center gap-2">
+                  <div className="w-1 h-4 bg-amber-500 rounded-full" />
+                  Внешний доступ (Доступ из интернета)
+                </h4>
+                <p className="text-sm text-slate-300 leading-relaxed">
+                  Чтобы коллеги могли зайти на сервер с любого устройства, используйте <b>Cloudflare Tunnel</b>. Это бесплатно и безопасно.
+                </p>
+                <div className="space-y-3">
+                  <div className="p-3 bg-slate-950/50 rounded-xl border border-slate-800 space-y-2">
+                    <p className="text-[11px] text-indigo-400 font-bold uppercase">Шаг 1: Установка</p>
+                    <code className="text-xs text-slate-400">brew install cloudflare/cloudflare/cloudflared</code>
+                  </div>
+                  <div className="p-3 bg-slate-950/50 rounded-xl border border-slate-800 space-y-2">
+                    <p className="text-[11px] text-indigo-400 font-bold uppercase">Шаг 2: Запуск туннеля</p>
+                    <div className="bg-slate-900 p-2 rounded font-mono text-[11px] break-all">
+                      cloudflared tunnel --url http://localhost:3000
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 italic mt-1 font-medium"> 
+                  * После запуска вы получите ссылку (напр. clinical-parts-move.trycloudflare.com), по которой сайт будет доступен всему миру.
+                </p>
               </section>
 
               <section className="space-y-3">
