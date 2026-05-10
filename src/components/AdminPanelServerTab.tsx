@@ -143,6 +143,29 @@ export const AdminPanelServerTab: React.FC = () => {
               <section className="space-y-3">
                 <h4 className="text-indigo-400 text-xs font-bold uppercase tracking-widest flex items-center gap-2">
                   <div className="w-1 h-4 bg-indigo-500 rounded-full" />
+                  GitHub & Авто-обновление
+                </h4>
+                <p className="text-sm text-slate-300 leading-relaxed text-balance">
+                  Чтобы не скачивать архивы вручную, используйте синхронизацию через GitHub. 
+                  Ваш репозиторий:
+                  <a href="https://github.com/projectspeedup-commits/server-calc" target="_blank" rel="noreferrer" className="block text-indigo-400 hover:underline mt-1 font-mono text-[11px] break-all">
+                    https://github.com/projectspeedup-commits/server-calc
+                  </a>
+                </p>
+                <div className="space-y-2">
+                  <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Команда для обновления кода:</p>
+                  <div className="bg-slate-950 p-4 rounded-xl font-mono text-sm border border-slate-800 group relative">
+                    <span className="text-slate-500">$</span> <span className="text-emerald-400">git</span> pull origin main
+                    <button onClick={() => copyToClipboard("git pull origin main")} className="absolute right-4 top-4 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <h4 className="text-indigo-400 text-xs font-bold uppercase tracking-widest flex items-center gap-2">
+                  <div className="w-1 h-4 bg-indigo-500 rounded-full" />
                   Подготовка & Переход
                 </h4>
                 <p className="text-sm text-slate-300 leading-relaxed">
