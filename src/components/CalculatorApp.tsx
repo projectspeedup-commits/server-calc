@@ -1,0 +1,2187 @@
+import {
+  DEFAULT_STEEL_GRADES,
+  formatCurrency,
+  formatInputValue,
+  getGostForGrade,
+  getLengthLabel,
+  getProfileGost,
+  handleNumericInput,
+  HEX_DATA,
+  ROUND_DATA,
+  TECH_COEFS_ROUND,
+  EconomyItem,
+  DEFAULT_ECONOMY_ITEMS,
+} from "../lib/constants";
+import {
+  AlertTriangle,
+  History,
+  Info,
+  LogOut,
+  Printer,
+  RotateCcw,
+  Save,
+  Moon,
+  Sun,
+  LayoutDashboard,
+  FileText,
+  Check,
+  Circle,
+  Hexagon,
+  AlertCircle,
+  Ruler,
+  ArrowRight,
+  CheckCircle2,
+  Package,
+  Scale,
+  Briefcase,
+  TrendingUp,
+  HelpCircle,
+  BarChart3,
+  Calculator,
+  Minus,
+  Plus,
+  PieChart
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { fetchUserHistory, saveCalculationToLocal, deleteCalculationFromLocal, clearUserHistoryFromLocal } from '../services/apiService';
+import { PrintTemplate } from "./PrintTemplate";
+import { validateNumeric, validateDimensions, cn } from "../lib/utils";
+
+import { ConfirmModal } from "./ConfirmModal";
+import { UserManualModal } from "./UserManualModal";
+
+// Sub-components
+import { ProfileSelector } from "./calculator/ProfileSelector";
+import { LengthInputs } from "./calculator/LengthInputs";
+import { EconomyDisplay } from "./calculator/EconomyDisplay";
+import { CalculationHistory } from "./calculator/CalculationHistory";
+
+// Utilities
+import { 
+  calculateBarWeightKg, 
+  calculateDrawCoefficient, 
+  getTechnicalCoefficients,
+  calculateRequiredWeightTons,
+  calculateOptimalBilletLengths,
+  calculateCommercialStats
+} from "../utils/math/calculatorCore";
+
+interface CalculatorAppProps {
+  adminRawPrices: Record<string, { md: string; nd: string }>;
+  adminScrapPrice: string;
+  adminRemnantPrice: string;
+  customGrades: string[];
+  deletedGrades?: string[];
+  remnantPricing: Record<string, { round: string; hex: string }>;
+  economyItems?: EconomyItem[];
+  onLogout: () => void;
+  isCloudActive: boolean;
+  user: any;
+  isDarkMode: boolean;
+  toggleTheme: () => void;
+  onAdminSwitch: () => void;
+  onPrintDataUpdate: (data: any) => void;
+}
+
+export function CalculatorApp({
+  adminRawPrices,
+  adminScrapPrice,
+  adminRemnantPrice,
+  customGrades,
+  deletedGrades = [],
+  remnantPricing,
+  economyItems = DEFAULT_ECONOMY_ITEMS,
+  onLogout,
+  isCloudActive,
+  user,
+  isDarkMode,
+  toggleTheme,
+  onAdminSwitch,
+  onPrintDataUpdate,
+}: CalculatorAppProps) {
+  const [profileType, setProfileType] = useState<"round" | "hex">("round");
+  const [steelGrade, setSteelGrade] = useState("");
+  const [selectedTarget, setSelectedTarget] = useState("");
+  const [selectedRaw, setSelectedRaw] = useState("");
+  const [orderWeight, setOrderWeight] = useState("");
+
+  const [lengthInput, setLengthInput] = useState<{ value: string; source: "raw" | "target" }>({
+    value: "6000",
+    source: "raw",
+  });
+  const [orderedLength, setOrderedLength] = useState("6000");
+
+  const [frontCoef, setFrontCoef] = useState("1.027");
+  const [backCoef, setBackCoef] = useState("1.003");
+
+  const [sellPrice, setSellPrice] = useState("");
+
+  const [isCopied, setIsCopied] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
+  const [savedCalculations, setSavedCalculations] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [notification, setNotification] = useState<{
+    message: string;
+    type: "success" | "error";
+  } | null>(null);
+  const [isEconomyExpanded, setIsEconomyExpanded] = useState(false);
+
+  // Validation Effect
+  useEffect(() => {
+    const errors: Record<string, string> = {};
+
+    if (!steelGrade) errors.steelGrade = "Выберите марку стали";
+
+    const weightVal = validateNumeric(orderWeight, { min: 0.001, fieldName: "Объем заказа" });
+    if (!weightVal.isValid && orderWeight) errors.orderWeight = weightVal.message!;
+
+    if (selectedTarget && selectedRaw) {
+      const dimVal = validateDimensions(selectedTarget, selectedRaw);
+      if (!dimVal.isValid) errors.dimensions = dimVal.message!;
+    }
+
+    if (lengthInput.value) {
+      const rawLenVal = validateNumeric(lengthInput.value, { min: 1000, max: 9000, fieldName: "Длина заготовки" });
+      if (!rawLenVal.isValid) errors.rawLength = rawLenVal.message!;
+    }
+
+    if (orderedLength && orderedLength !== "НД" && !orderedLength.includes("НД")) {
+      const orderLenVal = validateNumeric(orderedLength.replace(/[^\d]/g, ""), { 
+        min: 200, 
+        max: 8500, 
+        fieldName: "Длина заказа" 
+      });
+      if (!orderLenVal.isValid) errors.orderedLength = orderLenVal.message!;
+    }
+
+    if (sellPrice) {
+      const priceVal = validateNumeric(sellPrice, { min: 1, fieldName: "Цена продажи" });
+      if (!priceVal.isValid) errors.sellPrice = priceVal.message!;
+    }
+
+    setValidationErrors(errors);
+  }, [steelGrade, selectedTarget, selectedRaw, orderWeight, lengthInput.value, orderedLength, sellPrice]);
+
+  // Derived Data & Math
+  const activeData = profileType === "round" ? ROUND_DATA : HEX_DATA;
+  const allGrades = useMemo(() => {
+    return [...DEFAULT_STEEL_GRADES, ...(customGrades || [])].filter(
+      (g) => !deletedGrades.includes(g),
+    );
+  }, [customGrades, deletedGrades]);
+
+  const currentAdminRawPrice = useMemo(() => {
+    if (!steelGrade || !adminRawPrices) return "";
+    const prices = adminRawPrices[steelGrade];
+    if (!prices) return "";
+    const label = getLengthLabel(orderedLength);
+    return label.startsWith("МД") ? prices.md : prices.nd;
+  }, [steelGrade, adminRawPrices, orderedLength]);
+
+  const currentRemnantPricingRule = useMemo(() => {
+    if (!steelGrade) return "remnant";
+    return remnantPricing?.[steelGrade]?.[profileType] || "remnant";
+  }, [steelGrade, profileType, remnantPricing]);
+
+  const effectiveRemnantPrice = useMemo(() => {
+    return currentRemnantPricingRule === "scrap" ? adminScrapPrice : adminRemnantPrice;
+  }, [currentRemnantPricingRule, adminScrapPrice, adminRemnantPrice]);
+
+  const targetOptions = useMemo(() => {
+    return [...new Set(activeData.map((item) => item.target))].sort((a, b) => a - b);
+  }, [activeData]);
+
+  const rawOptions = useMemo(() => {
+    if (!selectedTarget) return [];
+    const targetVal = Number(selectedTarget);
+    return activeData
+      .filter((item) => item.target === targetVal && (profileType !== "round" || targetVal < 50.5 || item.raw <= targetVal + 3))
+      .map((item) => item.raw)
+      .sort((a, b) => a - b);
+  }, [selectedTarget, activeData, profileType]);
+
+  const currentDrawCoef = useMemo(() => {
+    if (!selectedTarget || !selectedRaw) return null;
+    return calculateDrawCoefficient(profileType, Number(selectedTarget), Number(selectedRaw), activeData);
+  }, [selectedTarget, selectedRaw, activeData, profileType]);
+
+  useEffect(() => {
+    if (selectedTarget && selectedRaw) {
+      const { front, back } = getTechnicalCoefficients(profileType, Number(selectedTarget), Number(selectedRaw));
+      setFrontCoef(front.toFixed(3));
+      setBackCoef(back.toFixed(3));
+    }
+  }, [selectedTarget, selectedRaw, profileType]);
+
+  useEffect(() => {
+    setSelectedTarget("");
+    setSelectedRaw("");
+  }, [profileType]);
+
+  useEffect(() => {
+    if (rawOptions.length > 0) {
+      const targetVal = Number(selectedTarget);
+      const standardMatch = activeData.find((item) => item.target === targetVal);
+      if (standardMatch && rawOptions.includes(standardMatch.raw)) {
+        setSelectedRaw(standardMatch.raw.toString());
+      } else if (!selectedRaw || !rawOptions.includes(Number(selectedRaw))) {
+        setSelectedRaw(rawOptions[0].toString());
+      }
+    } else {
+      setSelectedRaw("");
+    }
+  }, [selectedTarget, rawOptions, activeData]);
+
+  const totalTechCoef = useMemo(() => (Number(frontCoef) || 1) * (Number(backCoef) || 1), [frontCoef, backCoef]);
+
+  const displayedRawLength = lengthInput.source === "raw" ? lengthInput.value : (lengthInput.value && currentDrawCoef ? (Number(lengthInput.value) / currentDrawCoef).toFixed(1) : "");
+  const displayedTargetLength = lengthInput.source === "target" ? lengthInput.value : (lengthInput.value && currentDrawCoef ? (Number(lengthInput.value) * currentDrawCoef).toFixed(1) : "");
+
+  const lengthAfterTechEnds = useMemo(() => {
+    const draw = Number(displayedTargetLength);
+    return !isNaN(draw) && draw > 0 && totalTechCoef > 0 ? (draw / totalTechCoef).toFixed(1) : "";
+  }, [displayedTargetLength, totalTechCoef]);
+
+  const techEndsMm = useMemo(() => {
+    const draw = Number(displayedTargetLength);
+    const after = Number(lengthAfterTechEnds);
+    return !isNaN(draw) && !isNaN(after) && draw > after ? (draw - after).toFixed(1) : "";
+  }, [displayedTargetLength, lengthAfterTechEnds]);
+
+  const piecesPerBar = useMemo(() => {
+    if (lengthAfterTechEnds && orderedLength) {
+      const order = Number(orderedLength);
+      return order > 0 && Number(lengthAfterTechEnds) >= order ? Math.floor(Number(lengthAfterTechEnds) / order) : 0;
+    }
+    return 0;
+  }, [lengthAfterTechEnds, orderedLength]);
+
+  const remnantLength = useMemo(() => {
+    if (lengthAfterTechEnds && orderedLength) {
+      const usable = Number(lengthAfterTechEnds);
+      const order = Number(orderedLength);
+      if (isNaN(usable) || isNaN(order)) return "";
+      return (usable - order * (order > usable ? 1 : piecesPerBar)).toFixed(1);
+    }
+    return "";
+  }, [lengthAfterTechEnds, orderedLength, piecesPerBar]);
+
+  const optimalLengths = useMemo(() => {
+    if (!lengthAfterTechEnds) return [];
+    const target = Number(lengthAfterTechEnds);
+    const options = [];
+    for (let i = 1; i <= 20; i++) {
+      const optLen = Math.floor(target / i) - 5;
+      if (optLen >= 2500 && optLen <= 6500) options.push({ pieces: i, length: optLen });
+    }
+    const currentOrder = Number(orderedLength);
+    if (!isNaN(currentOrder) && currentOrder > 0) {
+      options.sort((a, b) => Math.abs(a.length - currentOrder) - Math.abs(b.length - currentOrder));
+    }
+    return options.slice(0, 4);
+  }, [lengthAfterTechEnds, orderedLength]);
+
+  const optimalBilletLengths = useMemo(() => 
+    calculateOptimalBilletLengths(Number(orderedLength), currentDrawCoef || 1, totalTechCoef, orderedLength.toUpperCase().includes("НД")),
+    [orderedLength, currentDrawCoef, totalTechCoef]
+  );
+
+  const requiredWeight = useMemo(() => 
+    calculateRequiredWeightTons(Number(orderWeight), piecesPerBar, Number(orderedLength), Number(displayedTargetLength)),
+    [orderWeight, piecesPerBar, orderedLength, displayedTargetLength]
+  );
+
+  const consumptionCoefficient = useMemo(() => 
+    requiredWeight && orderWeight && Number(orderWeight) > 0 ? (Number(requiredWeight) / Number(orderWeight)) : (currentDrawCoef || null),
+    [requiredWeight, orderWeight, currentDrawCoef]
+  );
+
+  const orderedBarWeight = useMemo(() => {
+    if (!orderedLength || Number(orderedLength) <= 0 || !selectedTarget) return null;
+    const kg = calculateBarWeightKg(profileType, Number(selectedTarget), Number(orderedLength));
+    return { tons: (kg / 1000).toFixed(5), kg: kg.toFixed(2) };
+  }, [orderedLength, selectedTarget, profileType]);
+
+  const remnantWeight = useMemo(() => {
+    if (!remnantLength || Number(remnantLength) <= 0 || !selectedTarget) return null;
+    const kg = calculateBarWeightKg(profileType, Number(selectedTarget), Number(remnantLength));
+    return { tons: (kg / 1000).toFixed(5), kg: kg.toFixed(2) };
+  }, [remnantLength, selectedTarget, profileType]);
+
+  const piecesPerTon = useMemo(() => {
+    if (!orderedBarWeight || Number(orderedBarWeight.kg) <= 0) return 0;
+    return Math.floor(1000 / Number(orderedBarWeight.kg));
+  }, [orderedBarWeight]);
+
+  const totalPiecesInOrder = useMemo(() => {
+    if (!piecesPerTon || !orderWeight) return 0;
+    return Math.floor(piecesPerTon * Number(orderWeight));
+  }, [piecesPerTon, orderWeight]);
+
+  const remnantValue = useMemo(() => {
+    if (!remnantWeight || !effectiveRemnantPrice) return 0;
+    return Number(remnantWeight.tons) * Number(effectiveRemnantPrice);
+  }, [remnantWeight, effectiveRemnantPrice]);
+
+  const advancedRemnantStats = useMemo(() => {
+    // Ported from original logic but slightly cleaned up
+    const hasRem = remnantLength && Number(remnantLength) > 0 && piecesPerBar > 0;
+    const hasTech = techEndsMm && Number(techEndsMm) > 0;
+    if (!hasRem && !hasTech) return null;
+    const productMm = Number(orderedLength) * piecesPerBar;
+    if (productMm === 0) return null;
+    const remRatio = (Number(remnantLength) || 0) / productMm;
+    const techRatio = (Number(techEndsMm) || 0) / productMm;
+    const totalRatio = remRatio + techRatio;
+    return {
+      valuePerTon: currentAdminRawPrice ? (totalRatio * Number(currentAdminRawPrice)).toFixed(2) : null,
+      revenuePerTon: (remRatio * Number(effectiveRemnantPrice || 0)) + (techRatio * Number(adminScrapPrice || 0)),
+      orderRevenue: ((remRatio * Number(effectiveRemnantPrice || 0)) + (techRatio * Number(adminScrapPrice || 0))) * Number(orderWeight || 0),
+      orderScrapValue: currentAdminRawPrice ? (totalRatio * Number(orderWeight || 0) * Number(currentAdminRawPrice)).toFixed(2) : null,
+      orderScrapTons: (totalRatio * Number(orderWeight || 0)).toFixed(3),
+      techTonsPerTon: techRatio,
+      remTonsPerTon: remRatio,
+      techValuePerTon: techRatio * Number(currentAdminRawPrice || 0),
+      remValuePerTon: remRatio * Number(currentAdminRawPrice || 0),
+      orderTechTons: techRatio * Number(orderWeight || 0),
+      orderRemTons: remRatio * Number(orderWeight || 0),
+      orderTechValue: techRatio * Number(orderWeight || 0) * Number(currentAdminRawPrice || 0),
+      orderRemValue: remRatio * Number(orderWeight || 0) * Number(currentAdminRawPrice || 0),
+      orderTechRevenue: techRatio * Number(adminScrapPrice || 0) * Number(orderWeight || 0),
+      orderRemRevenue: remRatio * Number(effectiveRemnantPrice || 0) * Number(orderWeight || 0),
+    };
+  }, [remnantLength, orderedLength, currentAdminRawPrice, adminScrapPrice, effectiveRemnantPrice, orderWeight, piecesPerBar, techEndsMm]);
+
+  const commercialStats = useMemo(() => 
+    calculateCommercialStats(Number(sellPrice), Number(currentAdminRawPrice), Number(orderWeight), economyItems, advancedRemnantStats),
+    [sellPrice, currentAdminRawPrice, orderWeight, economyItems, advancedRemnantStats]
+  );
+
+  useEffect(() => {
+    const loadHistory = async () => {
+      if (!isCloudActive || !user) return;
+      try {
+        const calcs = await fetchUserHistory(user.uid);
+        setSavedCalculations(calcs);
+      } catch (error) {
+        console.error("Failed to load history:", error);
+      }
+    };
+
+    loadHistory();
+  }, [user, isCloudActive]);
+
+  const showNotify = (
+    message: string,
+    type: "success" | "error" = "success",
+  ) => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 3000);
+  };
+
+  const handleSave = async () => {
+    // Check for validation errors first
+    const errorMessages = Object.values(validationErrors);
+    if (errorMessages.length > 0) {
+      showNotify(`Исправьте ошибки: ${errorMessages[0]}`, "error");
+      return;
+    }
+
+    if (!steelGrade || !selectedTarget || !selectedRaw) {
+      showNotify("Заполните основные поля расчета перед сохранением.", "error");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const payload: any = {
+        userId: user?.uid || "offline",
+        profileType,
+        steelGrade,
+        selectedTarget,
+        selectedRaw,
+        orderWeight,
+        orderedLength,
+        lengthInputValue: lengthInput.value,
+        lengthInputSource: lengthInput.source,
+        frontCoef,
+        backCoef,
+        usefulLength: lengthAfterTechEnds,
+        sellPrice,
+        rawPriceUsed: currentAdminRawPrice,
+        scrapPriceUsed: adminScrapPrice,
+        remnantPriceUsed: effectiveRemnantPrice,
+        label: `${getProfileGost(profileType)} ${selectedTarget}мм, ${steelGrade}`,
+      };
+
+      if (isCloudActive && user) {
+        await saveCalculationToLocal(user.uid, payload);
+        // Refresh local list
+        const calcs = await fetchUserHistory(user.uid);
+        setSavedCalculations(calcs);
+      } else {
+        payload.id = Date.now().toString();
+        payload.createdAt = { toDate: () => new Date() };
+        const newSaved = [payload, ...savedCalculations];
+        setSavedCalculations(newSaved);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("arsenal_offline_calcs", JSON.stringify(newSaved.map(c => ({...c, _createdAtMs: Date.now()}))));
+        }
+      }
+      showNotify("Расчет успешно сохранен");
+    } catch (err) {
+      console.error("Error saving calculation:", err);
+      showNotify("Ошибка при сохранении", "error");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const deleteCalculation = async (id: string) => {
+    if (confirm("Удалить этот расчет?")) {
+      try {
+        if (isCloudActive && user) {
+          await deleteCalculationFromLocal(id);
+          setSavedCalculations(prev => prev.filter(c => c.id !== id));
+        } else {
+          const newSaved = savedCalculations.filter(c => c.id !== id);
+          setSavedCalculations(newSaved);
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem("arsenal_offline_calcs", JSON.stringify(newSaved.map(c => ({...c, _createdAtMs: c.createdAt?.toDate ? c.createdAt.toDate().getTime() : Date.now()}))));
+          }
+        }
+        showNotify("Расчет удален");
+      } catch (err) {
+        showNotify("Ошибка при удалении", "error");
+      }
+    }
+  };
+
+  const clearAllHistory = async () => {
+    if (savedCalculations.length === 0) {
+      showNotify("История уже пуста");
+      return;
+    }
+
+    setShowDeleteConfirm(true);
+  };
+
+  const confirmClearAllHistory = async () => {
+    setShowDeleteConfirm(false);
+    setIsClearing(true);
+    try {
+      if (isCloudActive && user) {
+        await clearUserHistoryFromLocal(user.uid);
+        setSavedCalculations([]);
+      } else {
+        setSavedCalculations([]);
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem("arsenal_offline_calcs");
+        }
+      }
+
+      showNotify("История успешно очищена");
+    } catch (err) {
+      console.error("Error clearing history:", err);
+      showNotify(
+        "Ошибка при очистке истории: " +
+          (err instanceof Error ? err.message : String(err)),
+        "error",
+      );
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  const loadCalculation = (calc: any) => {
+    setProfileType(calc.profileType);
+    setSteelGrade(calc.steelGrade);
+    setSelectedTarget(calc.selectedTarget);
+    setSelectedRaw(calc.selectedRaw);
+    setOrderWeight(calc.orderWeight);
+    setOrderedLength(calc.orderedLength || "6000");
+    setSellPrice(calc.sellPrice || "");
+
+    if (calc.lengthInputValue && calc.lengthInputSource) {
+      setLengthInput({
+        value: calc.lengthInputValue,
+        source: calc.lengthInputSource,
+      });
+    }
+    if (calc.frontCoef) setFrontCoef(calc.frontCoef);
+    if (calc.backCoef) setBackCoef(calc.backCoef);
+
+    setShowHistory(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleReset = () => {
+    setProfileType("round");
+    setFrontCoef("1.027");
+    setSteelGrade("");
+    setSelectedTarget("");
+    setSelectedRaw("");
+    setOrderWeight("");
+    setLengthInput({ value: "6000", source: "raw" });
+    setOrderedLength("НД");
+    setSellPrice("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const reportData = useMemo(() => {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+    const gost = getGostForGrade(steelGrade);
+    const profileGost = getProfileGost(profileType);
+    const lengthLabel = getLengthLabel(orderedLength);
+    const rawPriceNum = Number(currentAdminRawPrice) || 0;
+    const sellPriceNum = Number(sellPrice) || 0;
+    const orderWeightNum = Number(orderWeight) || 0;
+    const scrapPriceNum = Number(adminScrapPrice) || 0;
+    const remnantPriceNum = Number(effectiveRemnantPrice) || 0;
+
+    let formattedGrade = steelGrade;
+    if (
+      steelGrade &&
+      !steelGrade.toLowerCase().startsWith("ст") &&
+      !steelGrade.toLowerCase().includes("а12")
+    ) {
+      formattedGrade = `ст.${steelGrade}`;
+    }
+
+    const techTons = advancedRemnantStats?.orderTechTons || 0;
+    const remTons = advancedRemnantStats?.orderRemTons || 0;
+
+    return {
+      dateStr,
+      gost,
+      profileTypeStr: profileType === "round" ? "Круг" : "Шестигранник",
+      profileGost,
+      lengthLabel,
+      rawPriceNum,
+      sellPriceNum,
+      orderWeightNum,
+      scrapPriceNum,
+      remnantPriceNum,
+      formattedGrade,
+      sellTotal: sellPriceNum * orderWeightNum,
+      displayedRawLength,
+      selectedRaw,
+      displayedTargetLength,
+      currentDrawCoef,
+      techEndsMm,
+      frontCoef,
+      backCoef,
+      lengthAfterTechEnds,
+      techTons,
+      remTons,
+      requiredWeight,
+      commercialStats,
+      advancedRemnantStats,
+      orderedLength,
+      remnantLength,
+    };
+  }, [
+    steelGrade,
+    profileType,
+    orderedLength,
+    currentAdminRawPrice,
+    sellPrice,
+    orderWeight,
+    adminScrapPrice,
+    effectiveRemnantPrice,
+    selectedTarget,
+    selectedRaw,
+    displayedRawLength,
+    displayedTargetLength,
+    currentDrawCoef,
+    techEndsMm,
+    frontCoef,
+    backCoef,
+    lengthAfterTechEnds,
+    requiredWeight,
+    commercialStats,
+    advancedRemnantStats,
+    remnantLength,
+  ]);
+
+  const reportText = useMemo(() => {
+    const {
+      dateStr,
+      formattedGrade,
+      gost,
+      profileTypeStr,
+      profileGost,
+      lengthLabel,
+      sellPriceNum,
+      sellTotal,
+      displayedRawLength,
+      selectedRaw,
+      displayedTargetLength,
+      currentDrawCoef,
+      techEndsMm,
+      frontCoef,
+      backCoef,
+      lengthAfterTechEnds,
+      techTons,
+      remTons,
+      requiredWeight,
+      commercialStats,
+      advancedRemnantStats,
+      rawPriceNum,
+      scrapPriceNum,
+      remnantPriceNum,
+      orderWeightNum,
+      orderedLength,
+      remnantLength,
+    } = reportData;
+
+    let text = `Детали расчета (ООО "ЗМК Арсенал") - ${dateStr}\n`;
+    text += `-----------------------------------\n`;
+    text += `Коммерческий блок:\n`;
+    text += `Марка стали: ${formattedGrade || "Не выбрана"}${gost ? ` (${gost})` : ""}\n`;
+    text += `Профиль: ${profileTypeStr} ${selectedTarget || "?"} мм (${profileGost})\n`;
+    text += `Длина: ${orderedLength || "?"} мм\n`;
+    text += `Объем заказа: ${orderWeight || "?"} тонн\n`;
+    text += `Цена за 1 тн продукции без НДС: ${formatCurrency(sellPriceNum)} руб.\n`;
+    text += `Цена за весь заказ без НДС: ${formatCurrency(sellTotal)} руб.\n`;
+    text += `Цена за весь заказ с НДС (22%): ${formatCurrency(sellTotal * 1.22)} руб.\n`;
+    text += `-----------------------------------\n`;
+    text += `Производственный блок:\n`;
+    text += `Заготовка длина: ${displayedRawLength || "?"} мм\n`;
+    text += `Диаметр заготовки: ${selectedRaw || "?"} мм\n`;
+    text += `Вытяжка после волочения: ${displayedTargetLength || "?"} мм. (коф.- ${currentDrawCoef ? currentDrawCoef.toFixed(3) : "?"})\n`;
+    text += `Тех. концы: ${techEndsMm || "0.0"} мм (Перед: ${frontCoef}, Зад: ${backCoef})\n`;
+    text += `Длина после удаления: = ${lengthAfterTechEnds || "0.0"} мм\n`;
+
+    if (advancedRemnantStats) {
+      text += `Лом количество: ${(techTons * 1000).toFixed(1)} кг. (${techTons.toFixed(3)} тн)\n`;
+      text += `Деловые остатки: ${(remTons * 1000).toFixed(1)} кг. (${remTons.toFixed(3)} тн)\n`;
+      text += `Длина делового остатка: ${remnantLength || "0"} мм\n`;
+    } else {
+      text += `Лом количество: ? кг.\n`;
+      text += `Деловые остатки: ? кг.\n`;
+    }
+    text += `-----------------------------------\n`;
+    text += `Блок снабжение:\n`;
+    text += `Сырье к закупке: Круг г/к ГОСТ 2590-2006 ф${selectedRaw || "?"} мм ${formattedGrade || "?"} (${gost || "?"})\n`;
+
+    if (optimalBilletLengths && optimalBilletLengths.length > 0) {
+      const recStr = optimalBilletLengths
+        .map((opt) => `${opt.billetLength} мм (на ${opt.n} шт.)`)
+        .join(", ");
+      text += `Рекомендуемая длина заготовки: ${recStr}\n`;
+    }
+
+    text += `Количество: ${requiredWeight || "?"} тн.\n`;
+    text += `-----------------------------------\n`;
+    text += `Блок экономика:\n`;
+    text += `Расчет на 1 тонну продукции\n`;
+    text += `Продажная цена (за 1 т): без НДС ${formatCurrency(sellPriceNum)} руб.\n`;
+    text += `- Стоимость заготовки: без НДС ${formatCurrency(rawPriceNum)} руб.\n`;
+
+    if (commercialStats) {
+      const directCosts = commercialStats.economyData.filter(
+        (i) => i.category === "direct" && i.costPerTon > 0,
+      );
+      if (directCosts.length > 0) {
+        text += `- Прямые затраты: ${formatCurrency(commercialStats.totalProcessingCostsPerTon)} руб.\n`;
+        directCosts.forEach((item) => {
+          text += `  └ ${item.name}: ${formatCurrency(item.costPerTon)} руб.\n`;
+        });
+      }
+    }
+
+    if (commercialStats && advancedRemnantStats && rawPriceNum > 0) {
+      text += `- Затраты на отходы (1 т): ${formatCurrency(commercialStats.lossesPerTon)} руб.\n`;
+      text += `  Лом (${(advancedRemnantStats.techTonsPerTon * 1000).toFixed(1)} кг): ${formatCurrency(advancedRemnantStats.techValuePerTon)} руб.\n`;
+      text += `  Деловой остаток (${(advancedRemnantStats.remTonsPerTon * 1000).toFixed(1)} кг):  ${formatCurrency(advancedRemnantStats.remValuePerTon)} руб.\n`;
+
+      text += `+ Возврат лома и остатков: ${formatCurrency(commercialStats.scrapRevenuePerTon)} руб.\n`;
+      text += `  Лом (${(advancedRemnantStats.techTonsPerTon * 1000).toFixed(1)} кг × ${formatCurrency(scrapPriceNum)} руб/т): ${formatCurrency(advancedRemnantStats.techScrapRevenuePerTon)} руб.\n`;
+      text += `  Деловой остаток (${(advancedRemnantStats.remTonsPerTon * 1000).toFixed(1)} кг × ${formatCurrency(remnantPriceNum)} руб/т): ${formatCurrency(advancedRemnantStats.remnantRevenuePerTon)} руб.`;
+    }
+
+    return text;
+  }, [reportData]);
+
+  const handleCopyToClipboard = () => {
+    if (reportText) {
+      navigator.clipboard.writeText(reportText);
+      showNotify("Отчет скопирован в буфер обмена");
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    }
+  };
+
+  return (
+    <>
+      <div className="min-h-screen bg-[#F4F5F4] dark:bg-[#121411] flex flex-col md:flex-row print:hidden transition-colors duration-300">
+        {/* Navigation Rail */}
+        <div className="hidden md:flex flex-col w-[88px] bg-[#F0F4F4] dark:bg-[#1A1C19] border-r border-slate-200 dark:border-slate-800 items-center py-6 fixed h-full z-50">
+          <div className="flex flex-col items-center mb-8 gap-4">
+            <button
+              onClick={onAdminSwitch}
+              className="w-12 h-12 bg-slate-700 dark:bg-slate-600 rounded-xl flex items-center justify-center text-white shadow-sm hover:bg-slate-800 transition-all active:scale-95"
+              title="Админ-панель"
+            >
+              <LayoutDashboard className="w-6 h-6" />
+            </button>
+          </div>
+          
+          <div className="flex-1 flex flex-col gap-4 w-full px-3">
+             <div className="w-full flex flex-col items-center py-4 text-[#1A1C19] dark:text-[#E2E3DE]">
+                <FileText className="w-6 h-6 mb-1" />
+                <span className="text-[10px] font-medium uppercase tracking-wider">Расчет</span>
+             </div>
+             
+             <button
+              onClick={toggleTheme}
+              className="w-full flex flex-col items-center py-4 text-slate-500 hover:text-[#1A1C19] dark:hover:text-[#E2E3DE] transition-all"
+            >
+              {isDarkMode ? <Sun className="w-6 h-6 mb-1 text-amber-500" /> : <Moon className="w-6 h-6 mb-1" />}
+              <span className="text-[10px] font-medium uppercase tracking-wider">{isDarkMode ? "Свет" : "Тень"}</span>
+            </button>
+          </div>
+
+          <button
+            onClick={onLogout}
+            className="w-full flex flex-col items-center py-6 text-slate-500 hover:text-red-500 transition-colors"
+          >
+            <LogOut className="w-6 h-6 mb-1" />
+            <span className="text-[10px] font-medium uppercase tracking-wider">Выход</span>
+          </button>
+        </div>
+
+        {/* Main Content */}
+        <div className="flex-1 md:ml-[88px] pb-24 md:pb-8 relative">
+          <div className="max-w-[1600px] w-full px-4 sm:px-6 lg:px-8 mx-auto">
+            
+            {/* Header and Quick Actions */}
+            <header className="pt-6 pb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 mb-6">
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight text-[#1A1C19] dark:text-[#E2E3DE]">
+                  ZMK ARSENAL <span className="font-light text-slate-400">Production</span>
+                </h1>
+                <p className="text-xs text-slate-500 font-medium uppercase tracking-widest mt-1">
+                  Калькулятор калиброванного проката
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowManual(true)}
+                  className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-50 transition-colors shadow-sm"
+                  title="Инструкция"
+                >
+                  <Info className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setShowHistory(!showHistory)}
+                  className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border transition-all shadow-sm ${
+                    showHistory 
+                    ? "bg-[#1A1C19] text-white border-[#1A1C19] dark:bg-[#E2E3DE] dark:text-[#121411]" 
+                    : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700"
+                  }`}
+                >
+                  <History className="w-4 h-4" />
+                  <span>История</span>
+                </button>
+                
+                <div className="h-8 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1 hidden sm:block" />
+                
+                <button
+                  onClick={handleSave}
+                  disabled={isSaving || !!validationErrors.steelGrade}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[#0D652D] hover:bg-[#0A5224] text-white rounded-xl text-sm font-semibold shadow-md transition-all disabled:opacity-50"
+                >
+                  {isSaving ? <RotateCcw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  <span>Сохранить</span>
+                </button>
+              </div>
+            </header>
+
+            <AnimatePresence>
+              {notification && (
+                <motion.div
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className={`fixed top-6 right-6 px-6 py-4 rounded-2xl shadow-2xl z-[100] border flex items-center gap-3 ${
+                    notification.type === "success" 
+                    ? "bg-green-600 border-green-500 text-white" 
+                    : "bg-red-600 border-red-500 text-white"
+                  }`}
+                >
+                  {notification.type === "success" ? <Check className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+                  <span className="font-bold">{notification.message}</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-20">
+              
+              {/* History Overlay */}
+              <AnimatePresence>
+                {showHistory && (
+                  <div className="lg:col-span-12">
+                     <CalculationHistory 
+                        savedCalculations={savedCalculations}
+                        onLoad={loadCalculation}
+                        onDelete={deleteCalculation}
+                        onClear={() => setShowDeleteConfirm(true)}
+                        isCloudActive={isCloudActive}
+                     />
+                  </div>
+                )}
+              </AnimatePresence>
+
+              <div className="lg:col-span-12 xl:col-span-7 space-y-4">
+                <section className="bg-white dark:bg-[#1A1C19] rounded-[16px] border border-slate-200 dark:border-slate-800 shadow-sm p-4 sm:p-5 print-shadow-none transition-colors duration-300">
+                  {/* Segmented Control */}
+                  <div className="bg-slate-100 dark:bg-slate-800 p-1 rounded-xl flex w-full sm:max-w-[280px] sm:mx-auto mb-6 print-hide">
+                    <button
+                      onClick={() => {
+                        setProfileType("round");
+                        setFrontCoef("1.027");
+                      }}
+                      className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium transition-all duration-200 focus:outline-none ${
+                        profileType === "round"
+                          ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm"
+                          : "text-slate-500 hover:text-slate-900 hover:bg-slate-200/50"
+                      }`}
+                    >
+                      <Circle className="w-3.5 h-3.5" /> Круг
+                    </button>
+                    <button
+                      onClick={() => {
+                        setProfileType("hex");
+                        setFrontCoef("1.03");
+                      }}
+                      className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium transition-all duration-200 focus:outline-none ${
+                        profileType === "hex"
+                          ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm"
+                          : "text-slate-500 hover:text-slate-900 hover:bg-slate-200/50"
+                      }`}
+                    >
+                      <Hexagon className="w-3.5 h-3.5" /> Шестигранник
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 sm:gap-6 items-end">
+                    <div className="space-y-1.5 text-slate-800 dark:text-white">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1 border-b-0">
+                        Марка стали{" "}
+                        {steelGrade && (
+                          <span className="lowercase font-normal opacity-70">
+                            ({getGostForGrade(steelGrade)})
+                          </span>
+                        )}
+                      </label>
+                      <div className="relative">
+  <select
+    value={steelGrade}
+    onChange={(e) => setSteelGrade(e.target.value)}
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.steelGrade ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg px-3 h-10 text-sm font-medium appearance-none cursor-pointer focus:border-slate-800 dark:focus:border-white focus:outline-none text-slate-900 dark:text-white transition-all`}
+  >
+    <option
+      value=""
+      disabled
+      className="bg-white dark:bg-slate-800 text-black dark:text-white"
+    >
+      Выберите марку...
+    </option>
+    {allGrades.map((grade) => (
+      <option
+        key={grade}
+        value={grade}
+        className="bg-white dark:bg-slate-800 text-black dark:text-white"
+      >
+        {grade}
+      </option>
+    ))}
+  </select>
+  {validationErrors.steelGrade && (
+    <div className="absolute -bottom-5 left-0 text-[9px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.steelGrade}
+    </div>
+  )}
+</div>
+                    </div>
+
+                    <div className="space-y-1.5 text-slate-800 dark:text-white">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1">
+                        Готовый пруток
+                      </label>
+                      <div className="relative">
+  <select
+    value={selectedTarget}
+    onChange={(e) => setSelectedTarget(e.target.value)}
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.dimensions ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg px-3 h-10 text-sm font-medium appearance-none cursor-pointer focus:border-slate-800 dark:focus:border-white focus:outline-none text-slate-900 dark:text-white transition-all`}
+  >
+    <option
+      value=""
+      disabled
+      className="bg-white dark:bg-slate-800 text-black dark:text-white"
+    >
+      Размер, мм...
+    </option>
+    {targetOptions.map((size) => (
+      <option
+        key={size}
+        value={size}
+        className="bg-white dark:bg-slate-800 text-black dark:text-white"
+      >
+        {size}
+      </option>
+    ))}
+  </select>
+</div>
+                    </div>
+
+                    <div className="space-y-1.5 text-slate-800 dark:text-white">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1">
+                        Заготовка
+                      </label>
+                      <div className="relative">
+  <select
+    value={selectedRaw}
+    onChange={(e) => setSelectedRaw(e.target.value)}
+    disabled={!selectedTarget}
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.dimensions ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg px-3 h-10 text-sm font-medium appearance-none disabled:opacity-50 cursor-pointer focus:border-slate-800 dark:focus:border-white focus:outline-none transition-all text-slate-900 dark:text-white`}
+  >
+    <option
+      value=""
+      disabled
+      className="bg-white dark:bg-slate-800 text-black dark:text-white"
+    >
+      {selectedTarget ? "Выбор..." : "Ожидание"}
+    </option>
+    {rawOptions.map((size) => (
+      <option
+        key={size}
+        value={size}
+        className="bg-white dark:bg-slate-800 text-black dark:text-white"
+      >
+        {size}
+      </option>
+    ))}
+  </select>
+  {validationErrors.dimensions && (
+    <div className="absolute -bottom-5 left-0 text-[10px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1 whitespace-nowrap">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.dimensions}
+    </div>
+  )}
+</div>
+                    </div>
+
+                    <div className="space-y-1.5 text-slate-800 dark:text-white">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1">
+                        Объем заказа
+                      </label>
+                      <div className="relative">
+  <input
+    type="text"
+    inputMode="decimal"
+    placeholder="Напр. 5"
+    value={orderWeight}
+    onChange={(e) =>
+      handleNumericInput(e, setOrderWeight)
+    }
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.orderWeight ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg pl-3 pr-8 h-10 text-sm font-medium outline-none transition-all placeholder:text-slate-400 focus:border-slate-800 dark:focus:border-white dark:text-white`}
+  />
+  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 font-bold text-xs">
+    тн
+  </span>
+  {validationErrors.orderWeight && (
+    <div className="absolute -bottom-5 left-0 text-[10px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.orderWeight}
+    </div>
+  )}
+</div>
+                    </div>
+
+                    <div className="col-span-1 sm:col-span-2 2xl:col-span-4 flex flex-col sm:flex-row gap-2 sm:gap-3 border-t border-slate-200 dark:border-slate-800 pt-4 mt-2">
+                      <div className="flex-1 flex justify-between items-center px-3 py-2 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                          Цена заготовки
+                        </span>
+                        <span className="font-medium text-slate-900 dark:text-white text-sm">
+                          {currentAdminRawPrice
+                            ? formatInputValue(currentAdminRawPrice)
+                            : "—"}{" "}
+                          <span className="text-slate-500 dark:text-slate-400 text-xs ml-1">
+                            руб/т
+                          </span>
+                        </span>
+                      </div>
+                      <div className="flex-1 flex justify-between items-center px-3 py-2 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                          Цена лома
+                        </span>
+                        <span className="font-medium text-slate-900 dark:text-white text-sm">
+                          {formatInputValue(adminScrapPrice)}{" "}
+                          <span className="text-slate-500 dark:text-slate-400 text-xs ml-1">
+                            руб/т
+                          </span>
+                        </span>
+                      </div>
+                      <div className="flex-1 flex justify-between items-center px-3 py-2 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                          Цена остатков
+                        </span>
+                        <span className="font-medium text-slate-900 dark:text-white text-sm">
+                          {formatInputValue(adminRemnantPrice)}{" "}
+                          <span className="text-slate-500 dark:text-slate-400 text-xs ml-1">
+                            руб/т
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="bg-white dark:bg-[#1A1C19] rounded-2xl p-4 sm:p-5 space-y-4 sm:space-y-6 print-shadow-none relative overflow-hidden border border-slate-200 dark:border-slate-800 shadow-sm transition-colors duration-300">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-3 relative z-10">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-[#4A6572]/10 border border-[#4A6572]/20 text-[#4A6572] dark:text-slate-300 rounded-xl print-hide">
+                        <Ruler className="w-4 h-4" />
+                      </div>
+                      <h2 className="text-lg font-medium tracking-tight text-[#1A1C19] dark:text-white">
+                        Раскрой и остатки
+                      </h2>
+                    </div>
+
+                    {optimalBilletLengths.length > 0 && (
+                      <div
+                        className={`bg-indigo-600/10 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 px-3 py-2 rounded-2xl flex items-center gap-4 transition-all ${orderedLength !== "НД" && orderedLength !== "6000" && orderedLength !== "" ? "ring-2 ring-indigo-500/30 shadow-[0_0_15px_rgba(99,102,241,0.2)]" : ""}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 shadow-sm">
+                            <Ruler className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-black text-indigo-700 dark:text-indigo-300 uppercase leading-none">
+                              Реком. заготовка
+                            </span>
+                            <span className="text-[8px] font-bold text-indigo-600/60 dark:text-indigo-400/60 uppercase mt-0.5">
+                              шаг 100мм
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex gap-1.5">
+                          {optimalBilletLengths.map((opt, i) => (
+                            <button
+                              key={i}
+                              onClick={() =>
+                                setLengthInput({
+                                  value: opt.billetLength.toString(),
+                                  source: "raw",
+                                })
+                              }
+                              className="flex flex-col items-center bg-white dark:bg-[#1A1C19] border border-indigo-100 dark:border-indigo-500/30 px-2.5 py-1 rounded-xl shadow-sm hover:border-indigo-400 dark:hover:border-indigo-400 hover:scale-105 active:scale-95 transition-all focus:outline-none group"
+                              title="Выбрать эту длину"
+                            >
+                              <span className="text-[11px] font-black text-indigo-700 dark:text-indigo-300 leading-none group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
+                                {opt.billetLength} мм.
+                              </span>
+                              <span className="text-[8px] font-bold text-slate-400 dark:text-slate-500 uppercase mt-0.5">
+                                на {opt.n} шт.
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Layout lengths */}
+                  <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] gap-3 sm:gap-4 items-center bg-white dark:bg-[#222421] border border-slate-200 dark:border-slate-700 p-4 rounded-[16px] relative z-10 shadow-sm">
+                    <div className="space-y-1.5 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1">
+                        Длина заготовки
+                      </label>
+                      <div className="relative">
+  <input
+    type="text"
+    inputMode="numeric"
+    value={displayedRawLength}
+    onChange={(e) =>
+      handleNumericInput(e, (val) =>
+        setLengthInput({ value: val, source: "raw" }),
+      )
+    }
+    disabled={!selectedTarget}
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.rawLength ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg pl-3 pr-10 h-10 text-sm font-medium transition-all disabled:opacity-50 placeholder:text-slate-400 focus:border-slate-800 dark:focus:border-white focus:bg-slate-200 dark:focus:bg-slate-700 focus:outline-none dark:text-white`}
+  />
+  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 font-medium text-xs">
+    мм
+  </span>
+  {validationErrors.rawLength && (
+    <div className="absolute -bottom-5 left-0 text-[10px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.rawLength}
+    </div>
+  )}
+</div>
+                    </div>
+
+                    <ArrowRight className="w-6 h-6 text-slate-400 hidden md:block shrink-0 mx-2" />
+
+                    <div className="space-y-1.5 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider ml-1">
+                        Вытяжка (после волочения)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          readOnly
+                          value={displayedTargetLength}
+                          className="w-full bg-[#E8DEF8] dark:bg-[#4A6572]/10 border-b border-[#6750A4] dark:border-[#4A6572] text-slate-900 dark:text-white rounded-t-lg pl-3 pr-10 h-10 text-sm font-semibold transition-all cursor-default focus:outline-none opacity-90"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6750A4] font-medium text-xs">
+                          мм
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Tech cuts */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 2xl:grid-cols-4 gap-3 items-end bg-white dark:bg-[#222421] border border-slate-200 dark:border-slate-700 p-4 rounded-[16px] relative z-10 shadow-sm">
+                    <div className="space-y-1 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase ml-1 tracking-wider">
+                        Обрезь перед
+                      </label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={formatInputValue(frontCoef)}
+                        className="w-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 rounded-lg px-3 h-9 text-sm font-medium cursor-default focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase ml-1 tracking-wider">
+                        Обрезь зад
+                      </label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={formatInputValue(backCoef)}
+                        className="w-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 rounded-lg px-3 h-9 text-sm font-medium cursor-default focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase ml-1 tracking-wider">
+                        Тех. концы
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          readOnly
+                          value={techEndsMm}
+                          className="w-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 rounded-lg pl-3 pr-8 h-9 text-sm font-medium cursor-default focus:outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500 font-medium text-xs">
+                          мм
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1 w-full col-span-2 sm:col-span-1 2xl:col-span-1">
+                      <label className="block text-[10px] font-semibold text-[#0D652D] dark:text-green-400 uppercase ml-1 tracking-wider">
+                        Полезная длина
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          readOnly
+                          value={lengthAfterTechEnds}
+                          className="w-full bg-[#E6F4EA] dark:bg-green-900/10 border border-[#CEEAD6] dark:border-green-900/30 text-[#0D652D] dark:text-green-400 rounded-lg pl-3 pr-8 h-9 text-sm font-semibold cursor-default focus:outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[#0D652D]/60 dark:text-green-400/60 font-medium text-xs">
+                          мм
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Ordered lengths */}
+                  <div className="bg-white dark:bg-[#1A1C19] border border-slate-200 dark:border-slate-800 p-4 sm:p-5 rounded-[16px] flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative z-10 shadow-sm transition-colors">
+                    <div>
+                      <label className="block text-base font-medium text-slate-900 dark:text-white tracking-tight">
+                        Длина заказа
+                      </label>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+                        Размер прутка в отгрузке
+                      </p>
+                    </div>
+                    <div className="relative w-full sm:w-1/3 shrink-0">
+  <input
+    type="text"
+    inputMode="numeric"
+    value={orderedLength}
+    onChange={(e) =>
+      handleNumericInput(e, setOrderedLength)
+    }
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.orderedLength ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} text-slate-900 dark:text-white rounded-t-lg px-4 h-12 text-lg font-medium transition-all focus:border-slate-800 dark:focus:border-white focus:bg-slate-200 dark:focus:bg-slate-700 focus:outline-none`}
+  />
+  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 font-medium text-xs">
+    мм
+  </span>
+  {validationErrors.orderedLength && (
+    <div className="absolute -bottom-5 left-0 text-[10px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.orderedLength}
+    </div>
+  )}
+</div>
+                  </div>
+
+                  {optimalLengths.length > 0 &&
+                    Number(lengthAfterTechEnds) > 0 && (
+                      <div className="bg-[#E8DEF8] dark:bg-[#4A6572]/10 border border-[#CAC4D0] dark:border-[#4A6572]/30 rounded-[16px] p-4 sm:p-5 print-hide relative z-10 shadow-sm transition-colors">
+                        <div className="flex flex-col lg:flex-row items-start gap-6">
+                          <div className="flex-1 space-y-4 w-full">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#CAC4D0]/50 dark:border-slate-800 pb-3">
+                              <div className="flex items-center gap-3">
+                                <div className="p-2 bg-[#6750A4]/10 dark:bg-white/10 rounded-xl hidden sm:flex items-center justify-center">
+                                  <Info className="w-5 h-5 text-[#1D192B] dark:text-slate-300" />
+                                </div>
+                                <div>
+                                  <h3 className="text-sm font-bold text-[#1D192B] dark:text-slate-200 uppercase tracking-tight">
+                                    Безотходный раскрой
+                                  </h3>
+                                  <p className="text-[10px] text-[#49454F] dark:text-slate-400 font-medium">
+                                    Оптимальная длина = (Чистая длина / Кол-во
+                                    частей) − 5 мм
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-3">
+                              {optimalLengths.map((opt, i) => (
+                                <div key={i} className="relative group/chip">
+                                  <button
+                                    onClick={() =>
+                                      setOrderedLength(opt.length.toString())
+                                    }
+                                    className="w-full bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 border border-emerald-200 dark:border-emerald-800/50 text-left p-3 rounded-xl transition-all duration-300 group flex items-center justify-between shadow-[0_0_15px_rgba(16,185,129,0.15)] hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:-translate-y-[3px] focus:outline-none relative overflow-hidden"
+                                  >
+                                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-yellow-300/20 to-transparent -translate-x-full group-hover:animate-[shimmer_2s_infinite] pointer-events-none"></div>
+                                    <style>{`
+                                @keyframes shimmer {
+                                  100% { transform: translateX(100%); }
+                                }
+                              `}</style>
+                                    <div className="relative z-10">
+                                      <div className="font-bold text-emerald-800 dark:text-emerald-300 text-sm whitespace-nowrap">
+                                        {opt.length} мм
+                                      </div>
+                                      <div className="text-[10px] text-emerald-600 dark:text-emerald-500/80 font-semibold uppercase tracking-wider">
+                                        На {opt.pieces}{" "}
+                                        {opt.pieces === 1
+                                          ? "часть"
+                                          : opt.pieces > 1 && opt.pieces < 5
+                                            ? "части"
+                                            : "частей"}
+                                      </div>
+                                    </div>
+                                    <div className="w-8 h-8 rounded-full bg-emerald-200/50 dark:bg-emerald-800/50 flex items-center justify-center relative z-10 group-hover:scale-110 transition-transform shrink-0">
+                                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                                    </div>
+                                  </button>
+                                  {/* Tooltip */}
+                                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-emerald-900 text-emerald-50 text-xs font-bold px-4 py-2 rounded-lg shadow-xl whitespace-nowrap opacity-0 group-hover/chip:opacity-100 transition-opacity pointer-events-none z-50">
+                                    Волшебный чип: щелкните по зеленой фигуре,
+                                    чтобы в один клик подставить безотходный
+                                    размер прутка!
+                                    <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-emerald-900 rotate-45"></div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Remnant processing */}
+                  {orderedLength && Number(orderedLength) > 0 && (
+                    <div className="bg-slate-50 dark:bg-[#222421] border border-slate-200 dark:border-slate-700 p-4 sm:p-5 rounded-[16px] relative z-10 shadow-sm transition-colors">
+                      {remnantLength &&
+                        Number(remnantLength) > 0 &&
+                        piecesPerBar > 0 && (
+                          <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 pb-4 border-b border-slate-200 dark:border-slate-800">
+                            <div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <h4 className="text-slate-900 dark:text-slate-200 text-[10px] font-bold uppercase tracking-wider">
+                                  Деловой остаток
+                                </h4>
+                                <span className="text-[8px] font-semibold bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400 px-1.5 py-0.5 rounded uppercase">
+                                  после реза {piecesPerBar} шт.
+                                </span>
+                              </div>
+                              <div className="flex items-baseline gap-2">
+                                <p className="text-2xl font-normal text-slate-900 dark:text-white tracking-tight">
+                                  {remnantLength}{" "}
+                                  <span className="text-base text-slate-500 dark:text-slate-400 font-semibold">
+                                    мм
+                                  </span>
+                                </p>
+                                {remnantWeight && (
+                                  <p className="text-slate-500 dark:text-slate-400 font-medium text-xs">
+                                    ~ {remnantWeight.tons} т ({remnantWeight.kg}{" "}
+                                    кг)
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                            {remnantValue && effectiveRemnantPrice && (
+                              <div
+                                className={`px-4 py-3 rounded-xl w-full lg:w-auto shadow-sm border ${currentRemnantPricingRule === "scrap" ? "bg-[#FFF8E1] dark:bg-amber-900/10 border-[#FFECB3] dark:border-amber-900/30" : "bg-[#E6F4EA] dark:bg-green-900/10 border-[#CEEAD6] dark:border-green-900/30"}`}
+                              >
+                                <span
+                                  className={`block text-[8px] font-bold uppercase tracking-wider ${currentRemnantPricingRule === "scrap" ? "text-[#E65100] dark:text-amber-500" : "text-[#0D652D] dark:text-green-500"}`}
+                                >
+                                  {currentRemnantPricingRule === "scrap"
+                                    ? "Стоимость лома"
+                                    : "Оценка остатка"}
+                                </span>
+                                <span
+                                  className={`text-lg font-normal tracking-tight ${currentRemnantPricingRule === "scrap" ? "text-[#E65100] dark:text-amber-500" : "text-[#0D652D] dark:text-green-500"}`}
+                                >
+                                  {new Intl.NumberFormat("ru-RU").format(
+                                    remnantValue,
+                                  )}{" "}
+                                  руб.
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="space-y-1.5 sm:border-r border-slate-200 dark:border-slate-800 sm:pr-4 group/bars">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
+                              Прутков ({orderedLength} мм) в 1 тн готовой
+                              продукции
+                            </span>
+                          </div>
+                          <div className="text-xl font-medium text-slate-900 dark:text-white">
+                            ~ {piecesPerTon || 0} шт.
+                          </div>
+                          {orderedBarWeight && (
+                            <div className="text-xs text-slate-500 dark:text-slate-400 font-medium tracking-tight">
+                              Вес 1 прутка:{" "}
+                              <span className="font-bold text-slate-700 dark:text-slate-200">
+                                {orderedBarWeight.kg} кг
+                              </span>
+                            </div>
+                          )}
+                          {orderWeight && orderedBarWeight ? (
+                            <div className="text-[10px] text-[#006A6A] dark:text-teal-400 font-bold bg-[#006A6A]/10 dark:bg-teal-900/20 px-2 py-1 rounded-md mt-2 inline-block border border-teal-500/10">
+                              В заказе: ~{" "}
+                              {new Intl.NumberFormat("ru-RU").format(
+                                totalPiecesInOrder || 0,
+                              )}{" "}
+                              шт.
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {advancedRemnantStats && (
+                          <>
+                            <div className="space-y-1.5 sm:border-r border-slate-200 dark:border-slate-800 sm:pr-4">
+                              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
+                                Стоимость отходов (1 тн)
+                              </span>
+                              <div className="text-xl font-medium tracking-tight text-slate-900 dark:text-white">
+                                {currentAdminRawPrice &&
+                                advancedRemnantStats.valuePerTon !== null
+                                  ? `${formatCurrency(advancedRemnantStats.valuePerTon)} руб.`
+                                  : "—"}
+                              </div>
+                              {currentAdminRawPrice &&
+                                advancedRemnantStats.tonsPerTon !== null && (
+                                  <div className="mt-2 space-y-1.5 border-l-2 border-slate-200 dark:border-slate-800 pl-3">
+                                    {advancedRemnantStats.techTonsPerTon >
+                                      0 && (
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400 flex justify-between font-medium">
+                                        <span>Лом:</span>
+                                        <span className="font-semibold text-slate-900 dark:text-slate-200">
+                                          {formatCurrency(
+                                            advancedRemnantStats.techValuePerTon,
+                                          )}{" "}
+                                          руб.
+                                        </span>
+                                      </div>
+                                    )}
+                                    {advancedRemnantStats.remTonsPerTon > 0 && (
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400 flex justify-between font-medium">
+                                        <span>Остаток:</span>
+                                        <span className="font-semibold text-slate-900 dark:text-slate-200">
+                                          {formatCurrency(
+                                            advancedRemnantStats.remValuePerTon,
+                                          )}{" "}
+                                          руб.
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
+                                Отходы на весь заказ
+                              </span>
+                              <div className="text-xl font-medium tracking-tight text-slate-900 dark:text-white">
+                                {currentAdminRawPrice &&
+                                orderWeight &&
+                                advancedRemnantStats.orderScrapValue !== null
+                                  ? `${formatCurrency(advancedRemnantStats.orderScrapValue)} руб.`
+                                  : "—"}
+                              </div>
+                              {currentAdminRawPrice &&
+                                orderWeight &&
+                                advancedRemnantStats.orderScrapTons !==
+                                  null && (
+                                  <div className="mt-2 space-y-1.5 border-l-2 border-slate-200 dark:border-slate-800 pl-3">
+                                    {advancedRemnantStats.orderTechTons > 0 && (
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400 flex justify-between font-medium">
+                                        <span>Лом:</span>
+                                        <span className="font-semibold text-slate-900 dark:text-slate-200">
+                                          {formatCurrency(
+                                            advancedRemnantStats.orderTechValue,
+                                          )}{" "}
+                                          руб.
+                                        </span>
+                                      </div>
+                                    )}
+                                    {advancedRemnantStats.orderRemTons > 0 && (
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400 flex justify-between font-medium">
+                                        <span>Остаток:</span>
+                                        <span className="font-semibold text-slate-900 dark:text-slate-200">
+                                          {formatCurrency(
+                                            advancedRemnantStats.orderRemValue,
+                                          )}{" "}
+                                          руб.
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {remnantLength && Number(remnantLength) < 0 && (
+                    <div className="p-3 bg-[#FFDAD6] border border-[#FFB4AB] rounded-xl flex items-start gap-3 relative z-10 shadow-sm mt-4">
+                      <AlertTriangle className="w-5 h-5 text-[#BA1A1A] shrink-0" />
+                      <div>
+                        <p className="text-sm font-bold text-[#BA1A1A] mb-0.5">
+                          Длина заказа превышает вытяжку
+                        </p>
+                        <p className="text-xs text-[#BA1A1A]/90 font-medium leading-relaxed">
+                          Из заготовки {displayedRawLength} мм получится пруток
+                          длиной {displayedTargetLength} мм. Заказанная длина{" "}
+                          {orderedLength} мм не поместится. Выберите заготовку
+                          длиннее или уменьшите длину отгрузки.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <div className="lg:col-span-12 xl:col-span-5 space-y-4">
+                <section className="grid grid-cols-1 sm:grid-cols-2 gap-4 relative">
+                  <div className="bg-white dark:bg-[#1A1C19] p-4 sm:p-5 flex flex-col justify-center relative z-10 border border-slate-200 dark:border-slate-800 rounded-[16px] shadow-sm transition-colors overflow-hidden">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="p-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-white rounded-xl">
+                        <Package className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                      </div>
+                      <h3 className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        Вес заготовки
+                      </h3>
+                    </div>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-3xl font-medium text-slate-900 dark:text-white tracking-tight">
+                        {requiredWeight || "0.00"}
+                      </span>
+                      <span className="text-base font-medium text-slate-500 dark:text-slate-400">
+                        тонн
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-[#1A1C19] p-4 sm:p-5 flex flex-col justify-center relative z-10 border border-slate-200 dark:border-slate-800 rounded-[16px] shadow-sm transition-colors overflow-hidden">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="p-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-white rounded-xl">
+                        <Scale className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                      </div>
+                      <h3 className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        Расходный коэффициент общий
+                      </h3>
+                    </div>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-3xl font-medium text-slate-900 dark:text-white tracking-tight">
+                        {consumptionCoefficient
+                          ? consumptionCoefficient.toFixed(3)
+                          : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                {/* COMMERCIAL COMMERCE SECTION */}
+                <section className="bg-white dark:bg-[#1A1C19] rounded-2xl p-4 sm:p-5 space-y-4 sm:space-y-6 print-shadow-none relative overflow-hidden z-10 border border-slate-200 dark:border-slate-800 shadow-sm transition-colors">
+                  <div className="flex items-center gap-3 border-b border-slate-200 dark:border-slate-800 pb-3 relative z-10">
+                    <div className="p-2 bg-slate-800 dark:bg-slate-700 text-white rounded-xl shadow-sm">
+                      <Briefcase className="w-4 h-4" />
+                    </div>
+                    <h2 className="text-lg font-medium tracking-tight text-[#1A1C19] dark:text-white">
+                      Коммерческий расчет
+                    </h2>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 dark:bg-[#222421] border border-slate-200 dark:border-slate-700 p-4 rounded-[16px] relative z-10 shadow-sm transition-colors">
+                    <div className="space-y-1.5 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1 truncate">
+                        Продажа за 1 т (без НДС)
+                      </label>
+                      <div className="relative">
+  <input
+    type="text"
+    inputMode="decimal"
+    placeholder="55 000"
+    value={formatInputValue(sellPrice)}
+    onChange={(e) => handleNumericInput(e, setSellPrice)}
+    className={`w-full bg-[#F0F4F4] dark:bg-slate-800 border-b ${validationErrors.sellPrice ? "border-red-500 ring-2 ring-red-500/20" : "border-slate-400 dark:border-slate-600"} rounded-t-lg pl-3 pr-10 h-10 text-sm font-medium transition-all focus:border-slate-800 dark:focus:border-white focus:bg-slate-200 dark:focus:bg-slate-700 focus:outline-none dark:text-white placeholder:text-slate-400`}
+  />
+  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 font-semibold text-xs">
+    руб
+  </span>
+  {validationErrors.sellPrice && (
+    <div className="absolute -bottom-5 left-0 text-[10px] font-bold text-red-500 uppercase tracking-tight flex items-center gap-1">
+      <AlertCircle className="w-2.5 h-2.5" /> {validationErrors.sellPrice}
+    </div>
+  )}
+</div>
+                    </div>
+
+                    <div className="space-y-1.5 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1 truncate">
+                        Сумма заказа (без НДС)
+                      </label>
+                      <div className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 h-10 flex items-center justify-between transition-colors">
+                        <span className="text-sm font-medium text-slate-900 dark:text-white truncate pl-1">
+                          {sellPrice && orderWeight
+                            ? formatCurrency(commercialStats?.sellTotal)
+                            : "0,00"}
+                        </span>
+                        <span className="text-slate-500 dark:text-slate-400 font-medium ml-1 text-xs">
+                          руб
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5 w-full">
+                      <label className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ml-1 truncate">
+                        Сумма (с НДС 22%)
+                      </label>
+                      <div className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 h-10 flex items-center justify-between transition-colors">
+                        <span className="text-sm font-medium text-slate-900 dark:text-white truncate pl-1">
+                          {sellPrice && orderWeight
+                            ? formatCurrency(commercialStats?.sellTotalVat)
+                            : "0,00"}
+                        </span>
+                        <span className="text-slate-500 dark:text-slate-400 font-medium ml-1 text-xs">
+                          руб
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {commercialStats && (
+                    <div className="bg-slate-50 dark:bg-[#222421] border border-slate-200 dark:border-slate-700 p-4 sm:p-5 rounded-[16px] space-y-6 mt-4 relative z-10 shadow-sm transition-colors">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-10 pl-1">
+                        {/* Per Ton Calculation */}
+                        <div className="space-y-4">
+                          <h4 className="text-slate-500 dark:text-slate-400 text-[10px] font-bold uppercase tracking-widest border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center justify-between">
+                            <span>На 1 тонну продукции (без НДС)</span>
+                            <TrendingUp className="w-3.5 h-3.5 opacity-60" />
+                          </h4>
+                          <div className="space-y-3.5 text-[13px]">
+                            <div className="flex justify-between items-start gap-4 font-medium group">
+                              <span className="text-slate-500 dark:text-slate-400 group-hover:text-slate-700 dark:group-hover:text-slate-200 transition-colors shrink-0">
+                                Продажная цена:
+                              </span>
+                              <span className="font-bold text-slate-900 dark:text-white text-right leading-tight">
+                                {formatCurrency(sellPrice)} руб.
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-start gap-4 text-[#BA1A1A] dark:text-red-400/90 font-medium group">
+                              <span className="group-hover:text-[#BA1A1A] transition-colors shrink-0 leading-tight">
+                                - Стоимость заготовки:
+                              </span>
+                              <span className="font-bold text-right leading-tight">
+                                {currentAdminRawPrice
+                                  ? `${formatCurrency(currentAdminRawPrice)} руб.`
+                                  : "—"}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-start gap-4 text-[#BA1A1A] dark:text-red-400/90 font-medium group">
+                              <span className="group-hover:text-[#BA1A1A] transition-colors shrink-0 leading-tight">
+                                - Прямые затраты:
+                              </span>
+                              <span className="font-bold text-right leading-tight">
+                                {formatCurrency(
+                                  commercialStats.totalProcessingCostsPerTon,
+                                )}{" "}
+                                руб.
+                              </span>
+                            </div>
+
+                            {commercialStats.economyData.filter(
+                              (i) =>
+                                i.category === "direct" && i.costPerTon > 0,
+                            ).length > 0 && (
+                              <div className="space-y-1.5 pl-2 border-l border-slate-200 dark:border-slate-800 ml-1.5 mb-1">
+                                {commercialStats.economyData
+                                  .filter(
+                                    (i) =>
+                                      i.category === "direct" &&
+                                      i.costPerTon > 0,
+                                  )
+                                  .map((item) => (
+                                    <div
+                                      key={item.id}
+                                      className="flex justify-between text-[11px] text-[#BA1A1A]/70 dark:text-red-400/70 font-medium tracking-tight"
+                                    >
+                                      <span className="truncate pr-4 leading-none">
+                                        └ {item.name}:
+                                      </span>
+                                      <span className="shrink-0 leading-none">
+                                        {formatCurrency(item.costPerTon)} ₽
+                                      </span>
+                                    </div>
+                                  ))}
+                              </div>
+                            )}
+
+                            <div className="flex justify-between items-start gap-4 text-[#BA1A1A] dark:text-red-400/90 font-medium group">
+                              <span className="group-hover:text-[#BA1A1A] transition-colors shrink-0 leading-tight">
+                                - Затраты на отходы:
+                              </span>
+                              <span className="font-bold text-right leading-tight">
+                                {formatCurrency(commercialStats.lossesPerTon)}{" "}
+                                руб.
+                              </span>
+                            </div>
+
+                            {commercialStats.scrapRevenuePerTon > 0 &&
+                              advancedRemnantStats && (
+                                <div className="mt-4 bg-[#E6F4EA]/50 dark:bg-green-950/20 px-3.5 py-3 rounded-[14px] border border-[#CEEAD6] dark:border-green-900/30 flex flex-col gap-2 transition-colors">
+                                  <div className="flex justify-between items-start gap-4 text-[#0D652D] dark:text-green-400 font-bold text-[12px]">
+                                    <span>+ Возврат лома / остатков:</span>
+                                    <span className="text-right">
+                                      {formatCurrency(
+                                        commercialStats.scrapRevenuePerTon,
+                                      )}{" "}
+                                      руб.
+                                    </span>
+                                  </div>
+                                  <div className="space-y-1 pl-1">
+                                    <div className="flex justify-between text-[11px] text-[#0D652D]/80 dark:text-green-400/80 font-medium">
+                                      <span>
+                                        Лом (
+                                        {(
+                                          advancedRemnantStats.techTonsPerTon *
+                                          1000
+                                        ).toFixed(1)}{" "}
+                                        кг):
+                                      </span>
+                                      <span>
+                                        {formatCurrency(
+                                          advancedRemnantStats.techScrapRevenuePerTon,
+                                        )}{" "}
+                                        руб.
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between text-[11px] text-[#0D652D]/80 dark:text-green-400/80 font-medium">
+                                      <span>
+                                        Деловой остаток (
+                                        {(
+                                          advancedRemnantStats.remTonsPerTon *
+                                          1000
+                                        ).toFixed(1)}{" "}
+                                        кг):
+                                      </span>
+                                      <span>
+                                        {formatCurrency(
+                                          advancedRemnantStats.remnantRevenuePerTon,
+                                        )}{" "}
+                                        руб.
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+
+                            <div className="pt-5 mt-2 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2">
+                              <div className="flex items-center gap-1.5 group/margin cursor-help">
+                                <span className="font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest text-[9px]">
+                                  Валовая прибыль (Маржа):
+                                </span>
+                                <HelpCircle className="w-3.5 h-3.5 text-slate-400 group-hover/margin:text-sky-500 transition-colors" />
+
+                                {/* Tooltip */}
+                                <div className="absolute z-50 bottom-full left-0 mb-2 invisible opacity-0 group-hover/margin:visible group-hover/margin:opacity-100 transition-all bg-slate-800 text-white text-xs p-3 rounded-xl shadow-xl w-64 translate-y-2 group-hover/margin:translate-y-0 pointer-events-none">
+                                  <strong>Внимание на цвет!</strong>
+                                  <br />
+                                  <span className="text-emerald-400">
+                                    Зеленый
+                                  </span>{" "}
+                                  — отличная маржа.
+                                  <br />
+                                  <span className="text-amber-400">
+                                    Желтый
+                                  </span>{" "}
+                                  — повышенный риск.
+                                  <br />
+                                  <span className="text-rose-400">
+                                    Красный
+                                  </span>{" "}
+                                  — сделка убыточна (меньше норматива).
+                                  <div className="absolute -bottom-1.5 left-6 w-3 h-3 bg-slate-800 rotate-45"></div>
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 group/profit">
+                                <span
+                                  className={`font-bold tracking-tight text-2xl leading-none whitespace-nowrap group-hover/profit:animate-[color-cycle_3s_ease-in-out_infinite] ${commercialStats.isPositive ? "text-[#0D652D] dark:text-green-400" : "text-[#BA1A1A] dark:text-red-400"}`}
+                                >
+                                  {commercialStats.isPositive ? "+" : ""}
+                                  {formatCurrency(
+                                    commercialStats.profitPerTon,
+                                  )}{" "}
+                                  <span className="text-sm font-medium">
+                                    руб.
+                                  </span>
+                                </span>
+                                <span
+                                  className={`text-[10px] font-black px-2 py-0.5 rounded-md border shadow-sm group-hover/profit:animate-[color-cycle-bg_3s_ease-in-out_infinite] ${commercialStats.isPositive ? "bg-[#E6F4EA] dark:bg-green-900/40 border-[#CEEAD6] dark:border-green-900/50 text-[#0D652D] dark:text-green-400" : "bg-[#FFDAD6] dark:bg-red-900/40 border-[#FFB4AB] dark:border-red-900/50 text-[#BA1A1A] dark:text-red-400"}`}
+                                >
+                                  {commercialStats.isPositive ? "+" : ""}
+                                  {commercialStats.marginPercent.toFixed(1)}%
+                                </span>
+                                <style>{`
+                            @keyframes color-cycle {
+                              0% { color: #f87171; } /* red-400 */
+                              50% { color: #fbbf24; } /* amber-400 */
+                              100% { color: #4ade80; } /* green-400 */
+                            }
+                            @keyframes color-cycle-bg {
+                              0% { background-color: rgba(153, 27, 27, 0.4); border-color: rgba(153, 27, 27, 0.5); color: #f87171; }
+                              50% { background-color: rgba(146, 64, 14, 0.4); border-color: rgba(146, 64, 14, 0.5); color: #fbbf24; }
+                              100% { background-color: rgba(20, 83, 45, 0.4); border-color: rgba(20, 83, 45, 0.5); color: #4ade80; }
+                            }
+                          `}</style>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Total Order Calculation */}
+                        <div className="space-y-4">
+                          <h4 className="text-slate-500 dark:text-slate-400 text-[10px] font-bold uppercase tracking-widest border-b border-slate-200 dark:border-slate-800 pb-2 flex items-center justify-between">
+                            <span>
+                              На весь заказ ({totalPiecesInOrder} шт.)
+                            </span>
+                            <BarChart3 className="w-3.5 h-3.5 opacity-60" />
+                          </h4>
+                          <div className="space-y-3.5 text-[13px]">
+                            <div className="flex justify-between items-start gap-4 font-medium">
+                              <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                                Сумма продажи:
+                              </span>
+                              <span className="font-bold text-slate-900 dark:text-white text-right leading-tight">
+                                {formatCurrency(commercialStats.sellTotal)} руб.
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-start gap-4 text-[#BA1A1A] dark:text-red-400/90 font-medium">
+                              <span className="shrink-0">- Все затраты:</span>
+                              <span className="font-bold text-right leading-tight">
+                                {formatCurrency(
+                                  commercialStats.totalCostsPerTon *
+                                    Number(orderWeight),
+                                )}{" "}
+                                руб.
+                              </span>
+                            </div>
+                            {commercialStats.scrapRevenueTotal > 0 &&
+                              advancedRemnantStats && (
+                                <div className="space-y-2.5">
+                                  <div className="flex justify-between items-start gap-4 text-[#0D652D] dark:text-green-400 font-bold">
+                                    <span className="shrink-0">
+                                      + Общий возврат:
+                                    </span>
+                                    <span className="text-right leading-tight">
+                                      {formatCurrency(
+                                        commercialStats.scrapRevenueTotal,
+                                      )}{" "}
+                                      руб.
+                                    </span>
+                                  </div>
+                                  <div className="space-y-1.5 pl-1.5">
+                                    <div className="flex justify-between text-[11px] text-[#0D652D]/80 dark:text-green-400/80 font-semibold">
+                                      <span>
+                                        Лом (
+                                        {advancedRemnantStats.orderTechTons.toFixed(
+                                          3,
+                                        )}{" "}
+                                        т):
+                                      </span>
+                                      <span>
+                                        {formatCurrency(
+                                          advancedRemnantStats.orderTechRevenue,
+                                        )}{" "}
+                                        руб.
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between text-[11px] text-[#0D652D]/80 dark:text-green-400/80 font-semibold">
+                                      <span>
+                                        Деловой остаток (
+                                        {advancedRemnantStats.orderRemTons.toFixed(
+                                          3,
+                                        )}{" "}
+                                        т):
+                                      </span>
+                                      <span>
+                                        {formatCurrency(
+                                          advancedRemnantStats.orderRemRevenue,
+                                        )}{" "}
+                                        руб.
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+
+                            <div className="mt-4 p-4 bg-slate-100/80 dark:bg-slate-800/60 rounded-[18px] border border-slate-200/50 dark:border-slate-700/50 space-y-3 transition-colors">
+                              <div className="flex justify-between items-start gap-4 text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                <span className="shrink-0 uppercase tracking-widest leading-none">
+                                  Налог (НДС 22%):
+                                </span>
+                                <span className="text-right leading-none">
+                                  {formatCurrency(
+                                    commercialStats.sellTotalVat -
+                                      commercialStats.sellTotal,
+                                  )}{" "}
+                                  руб.
+                                </span>
+                              </div>
+                              <div className="border-t border-slate-200 dark:border-slate-700/80 pt-3 flex justify-between items-center gap-3">
+                                <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+                                  Итого с НДС
+                                </span>
+                                <span className="text-xl font-bold text-slate-900 dark:text-white leading-none whitespace-nowrap">
+                                  {formatCurrency(commercialStats.sellTotalVat)}{" "}
+                                  <span className="text-xs font-bold opacity-60 ml-0.5">
+                                    ₽
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="pt-3 flex flex-col gap-2">
+                              <span className="font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest text-[9px]">
+                                Чистая прибыль (всего):
+                              </span>
+                              <span
+                                className={`font-bold tracking-tight text-2xl leading-none whitespace-nowrap ${commercialStats.isPositive ? "text-[#0D652D] dark:text-green-400" : "text-[#BA1A1A] dark:text-red-400"}`}
+                              >
+                                {commercialStats.isPositive ? "+" : ""}
+                                {formatCurrency(
+                                  commercialStats.profitTotal,
+                                )}{" "}
+                                <span className="text-sm font-medium">
+                                  руб.
+                                </span>
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* DETAILED PRODUCTION ECONOMY SECTION */}
+                  {commercialStats && (
+                    <div className="bg-white dark:bg-[#1A1C19] border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm transition-all focus-within:ring-2 focus-within:ring-slate-400">
+                      <button
+                        onClick={() => setIsEconomyExpanded(!isEconomyExpanded)}
+                        className="w-full px-5 py-4 flex items-center justify-between group hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-xl group-hover:scale-110 transition-transform">
+                            <Calculator className="w-5 h-5 text-slate-600 dark:text-slate-400" />
+                          </div>
+                          <div className="text-left">
+                            <h3 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">
+                              Экономика производства
+                            </h3>
+                            <p className="text-[10px] text-slate-500 font-medium uppercase tracking-widest mt-0.5">
+                              Детализация затрат на тоннну:{" "}
+                              <span className="text-slate-900 dark:text-slate-200 font-bold">
+                                {formatCurrency(
+                                  commercialStats.totalProcessingCostsPerTon,
+                                )}{" "}
+                                руб.
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-bold text-[#4A6572] bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-lg hidden sm:block">
+                            {isEconomyExpanded ? "СВЕРНУТЬ" : "РАСКРЫТЬ ДЕТАЛИ"}
+                          </span>
+                          {isEconomyExpanded ? (
+                            <Minus className="w-4 h-4 text-slate-400" />
+                          ) : (
+                            <Plus className="w-4 h-4 text-slate-400" />
+                          )}
+                        </div>
+                      </button>
+
+                      <div
+                        id="economy-breakdown"
+                        className={`${isEconomyExpanded ? "block" : "hidden"} border-t border-slate-100 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 bg-slate-50/50 dark:bg-[#222421]/50`}
+                      >
+                        {/* Direct Costs */}
+                        <div className="p-5">
+                          <div className="flex items-center justify-between mb-4">
+                            <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                              <Circle className="w-1.5 h-1.5 fill-blue-500 text-blue-500" />
+                              Состав прямых затрат
+                            </h4>
+                            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                              {formatCurrency(
+                                commercialStats.directEconomyCostsPerTon,
+                              )}{" "}
+                              руб./т
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {commercialStats.economyData
+                              .filter(
+                                (i) =>
+                                  i.category === "direct" && i.costPerTon > 0,
+                              )
+                              .map((item) => (
+                                <div
+                                  key={item.id}
+                                  className="bg-white dark:bg-[#1A1C19] p-3 rounded-[18px] border border-slate-100 dark:border-slate-800 shadow-sm flex flex-col gap-2"
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[11px] font-bold text-slate-900 dark:text-slate-200 truncate pr-2">
+                                      {item.name}
+                                    </span>
+                                    <TrendingUp className="w-3 h-3 text-slate-300 shrink-0" />
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] text-slate-500 font-medium">
+                                        Норма на тн:
+                                      </span>
+                                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                                        {formatCurrency(item.costPerTon)} ₽
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center justify-between border-t border-slate-50 dark:border-slate-800/50 pt-1.5">
+                                      <span className="text-[10px] text-slate-500 font-medium">
+                                        Сумма на весь заказ:
+                                      </span>
+                                      <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                                        {formatCurrency(
+                                          item.costPerTon * Number(orderWeight),
+                                        )}{" "}
+                                        ₽
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                          </div>
+                        </div>
+
+                        {/* Overhead Costs */}
+                        {commercialStats.economyData.filter(
+                          (i) => i.category === "overhead" && i.costPerTon > 0,
+                        ).length > 0 && (
+                          <div className="p-5 border-t border-slate-100 dark:border-slate-800">
+                            <div className="flex items-center justify-between mb-4">
+                              <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                <Circle className="w-1.5 h-1.5 fill-amber-500 text-amber-500" />
+                                Общие/Накладные расходы
+                              </h4>
+                              <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                                {formatCurrency(
+                                  commercialStats.overheadEconomyCostsPerTon,
+                                )}{" "}
+                                руб./т
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                              {commercialStats.economyData
+                                .filter(
+                                  (i) =>
+                                    i.category === "overhead" &&
+                                    i.costPerTon > 0,
+                                )
+                                .map((item) => (
+                                  <div
+                                    key={item.id}
+                                    className="bg-white dark:bg-[#1A1C19] p-3 rounded-[18px] border border-slate-100 dark:border-slate-800 shadow-sm flex flex-col gap-2"
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] font-bold text-slate-900 dark:text-slate-200 truncate pr-2">
+                                        {item.name}
+                                      </span>
+                                      <PieChart className="w-3 h-3 text-slate-300 shrink-0" />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-[10px] text-slate-500 font-medium">
+                                          Норма на тн:
+                                        </span>
+                                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                                          {formatCurrency(item.costPerTon)} ₽
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center justify-between border-t border-slate-50 dark:border-slate-800/50 pt-1.5">
+                                        <span className="text-[10px] text-slate-500 font-medium">
+                                          Сумма на заказ:
+                                        </span>
+                                        <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                                          {formatCurrency(
+                                            item.costPerTon *
+                                              Number(orderWeight),
+                                          )}{" "}
+                                          ₽
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {commercialStats && (
+                    <div className="grid grid-cols-1 gap-3 pt-4 relative z-10 font-sans tracking-tight">
+                      {commercialStats.netLossesPerTon > 0 && (
+                        <div className="bg-[#FFF8E1] dark:bg-amber-900/10 border border-[#FFECB3] dark:border-amber-900/30 p-4 rounded-xl flex gap-3 shadow-sm transition-colors">
+                          <Info className="w-5 h-5 text-[#E65100] dark:text-amber-500 shrink-0" />
+                          <div>
+                            <h5 className="font-semibold text-[#E65100] dark:text-amber-500 text-sm mb-1">
+                              Рекомендация по цене
+                            </h5>
+                            <p className="text-[#E65100]/80 dark:text-amber-500/80 text-[11px] font-medium mb-2">
+                              Чистые потери от отходов:{" "}
+                              <span className="font-bold">
+                                {formatCurrency(
+                                  commercialStats.netLossesPerTon,
+                                )}{" "}
+                                руб./т
+                              </span>
+                              .
+                            </p>
+                            <div className="inline-flex items-center bg-white/60 dark:bg-white/10 px-3 py-1.5 rounded-lg text-slate-900 dark:text-white font-bold text-sm border border-slate-200 dark:border-white/10 shadow-sm">
+                              Рекомендуемая цена:{" "}
+                              {formatCurrency(
+                                Number(sellPrice) +
+                                  Number(commercialStats.netLossesPerTon),
+                              )}{" "}
+                              руб./т (БЕЗ НДС)
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {commercialStats.profitPerTon > 0 &&
+                        commercialStats.profitPerTon < 10000 && (
+                          <div className="border border-[#FFECB3] dark:border-amber-900/30 p-4 rounded-xl flex gap-3 shadow-sm bg-white dark:bg-[#1A1C19] transition-colors">
+                            <AlertTriangle className="w-5 h-5 text-[#E65100] dark:text-amber-500 shrink-0" />
+                            <div>
+                              <h5 className="font-semibold text-[#E65100] dark:text-amber-500 text-sm mb-1">
+                                Осторожно
+                              </h5>
+                              <p className="text-slate-500 dark:text-slate-400 text-xs font-medium">
+                                Маржинальность на тонну меньше 10 000 руб. (
+                                {formatCurrency(commercialStats.profitPerTon)}{" "}
+                                руб./т).
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      {commercialStats.profitPerTon <= 0 &&
+                        currentAdminRawPrice &&
+                        sellPrice && (
+                          <div className="bg-[#FFDAD6] dark:bg-red-900/20 border border-[#FFB4AB] dark:border-red-900/40 p-4 rounded-xl flex gap-3 shadow-sm transition-colors">
+                            <AlertTriangle className="w-5 h-5 text-[#BA1A1A] dark:text-red-400 shrink-0" />
+                            <div>
+                              <h5 className="font-semibold text-[#BA1A1A] dark:text-red-400 text-sm mb-1">
+                                Сделка убыточна
+                              </h5>
+                              <p className="text-[#BA1A1A]/80 dark:text-red-400/80 text-xs font-medium">
+                                Пересмотрите цену продажи или согласуйте новую
+                                длину.
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ConfirmModal
+        isOpen={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        onConfirm={confirmClearAllHistory}
+        title="Подтвердите действие"
+        message={`Вы действительно хотите удалить историю расчетов (${savedCalculations.length} записей)? Это действие необратимо.`}
+        confirmText="Удалить все"
+        cancelText="Отмена"
+      />
+      <UserManualModal
+        isOpen={showManual}
+        onClose={() => setShowManual(false)}
+      />
+    </>
+  );
+}
